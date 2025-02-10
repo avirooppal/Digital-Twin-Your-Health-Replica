@@ -1,0 +1,29 @@
+# Python files
+*.pyc
+*.pyo
+__pycache__/
+
+# Virtual environment
+venv/
+.venv/
+
+# IDE-specific files
+.vscode/
+.idea/
+
+# Build files
+build/
+dist/
+*.egg-info/
+
+# Test files
+.pytest_cache/
+test_results/
+coverage/
+
+# Local configuration
+.env
+local_settings.py
+
+# Jupyter Notebook
+*.ipynb_checkpoints/
