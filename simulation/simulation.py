@@ -3,9 +3,27 @@ import numpy as np
 import pandas as pd
 from scipy.integrate import odeint
 import logging
+import requests
+from io import StringIO
+import pickle
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.DEBUG)
+
+MODEL_FILE = "tumor_model.pkl"
+
+
+# Download real-world data from a public dataset
+DATA_URL = "https://raw.githubusercontent.com/cBioPortal/datahub/master/public/brca_tcga_pan_can_atlas_2018/data_clinical_patient.txt"
+
+# Load real-world data
+def load_real_world_data():
+    response = requests.get(DATA_URL)
+    if response.status_code == 200:
+        data = pd.read_csv(StringIO(response.text), sep='\t')
+        return data
+    else:
+        raise Exception("Failed to download real-world data")
 
 # Drug effectiveness coefficients based on type
 DRUG_COEFFICIENTS = {
@@ -97,42 +115,32 @@ def simulate_treatment(patient, drug_type, dose):
     
     results = np.array(results)
     return time[1:], results[:, 0], results[:, 1]  # time, tumor sizes, drug concentrations
+def save_model():
+    with open(MODEL_FILE, "wb") as f:
+        pickle.dump((tumor_growth, simulate_treatment), f)
+
+def load_model():
+    with open(MODEL_FILE, "rb") as f:
+        return pickle.load(f)
+    
 
 @app.route('/simulate', methods=['POST'])
 def simulate():
     try:
         patient = request.json
         logging.debug(f"Received request: {patient}")
-        
         results = []
+        
         for dose, drug in zip(patient["drug_doses"], patient["drug_types"]):
-            # Run simulation
             time, tumor_sizes, drug_concentrations = simulate_treatment(patient, drug, dose)
-            
-            # Calculate metrics
-            initial_size = patient["tumor_size"]
-            final_size = float(tumor_sizes[-1])  # Convert to Python float
-            
-            # Calculate reduction percentage
+            initial_size, final_size = patient["tumor_size"], float(tumor_sizes[-1])
             reduction_percentage = float(max(0, ((initial_size - final_size) / initial_size) * 100))
             
-            # Find time to half size
-            time_to_half = next(
-                (float(t) for t, s in zip(time, tumor_sizes) if s <= initial_size / 2),
-                float('inf')
-            )
-            
-            # Calculate effectiveness score
+            time_to_half = next((float(t) for t, s in zip(time, tumor_sizes) if s <= initial_size / 2), float('inf'))
             reduction_speed = 1 / (time_to_half + 1) if time_to_half != float('inf') else 0
-            sustained_effect = bool(np.mean(tumor_sizes[-len(tumor_sizes)//4:]) < initial_size / 2)  # Convert to Python bool
+            sustained_effect = bool(np.mean(tumor_sizes[-len(tumor_sizes)//4:]) < initial_size / 2)
             side_effects_factor = 1 - (dose / max(patient["drug_doses"]) * 0.3)
-            
-            ranking_score = float(
-                reduction_percentage * 0.4 +
-                reduction_speed * 40 +
-                (sustained_effect * 20) +
-                side_effects_factor * 10
-            )
+            ranking_score = float(reduction_percentage * 0.4 + reduction_speed * 40 + (sustained_effect * 20) + side_effects_factor * 10)
             
             results.append({
                 "drug": drug,
@@ -145,14 +153,8 @@ def simulate():
                 "side_effects_risk": round(float(1 - side_effects_factor) * 100, 2)
             })
         
-        # Sort by ranking score
         results.sort(key=lambda x: -x["ranking_score"])
-        best_treatment = results[0]
-        
-        return jsonify({
-            "best_treatment": best_treatment,
-            "all_results": results
-        })
+        return jsonify({"best_treatment": results[0], "all_results": results})
         
     except KeyError as e:
         logging.error(f"Missing key in request: {e}")
@@ -162,4 +164,5 @@ def simulate():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
+    save_model()
     app.run(debug=True)
