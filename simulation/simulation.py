@@ -1,121 +1,75 @@
 import os
 from flask import Flask, request, jsonify
+from flask_cors import CORS  # Enable CORS
 import numpy as np
 import pandas as pd
 from scipy.integrate import odeint
 import logging
-import requests
-from io import StringIO
 import pickle
 
 app = Flask(__name__)
+CORS(app)  # Allow CORS for all origins
+# CORS(app, origins=["http://localhost:5173"])  # Use this for specific frontend
+
 logging.basicConfig(level=logging.DEBUG)
 
 MODEL_FILE = "tumor_model.pkl"
 
-
-# Download real-world data from a public dataset
-DATA_URL = "https://raw.githubusercontent.com/cBioPortal/datahub/master/public/brca_tcga_pan_can_atlas_2018/data_clinical_patient.txt"
-
-# Load real-world data
-def load_real_world_data():
-    response = requests.get(DATA_URL)
-    if response.status_code == 200:
-        data = pd.read_csv(StringIO(response.text), sep='\t')
-        return data
-    else:
-        raise Exception("Failed to download real-world data")
-
-# Drug effectiveness coefficients based on type
+# Drug effectiveness coefficients
 DRUG_COEFFICIENTS = {
-    "Chemotherapy": {
-        "direct_kill": 0.8,
-        "growth_inhibition": 0.3,
-        "half_life": 24  # hours
-    },
-    "Immunotherapy": {
-        "direct_kill": 0.4,
-        "growth_inhibition": 0.6,
-        "half_life": 48  # hours
-    },
-    "Targeted Therapy": {
-        "direct_kill": 0.6,
-        "growth_inhibition": 0.5,
-        "half_life": 36  # hours
-    }
+    "Chemotherapy": {"direct_kill": 0.8, "growth_inhibition": 0.3, "half_life": 24},
+    "Immunotherapy": {"direct_kill": 0.4, "growth_inhibition": 0.6, "half_life": 48},
+    "Targeted Therapy": {"direct_kill": 0.6, "growth_inhibition": 0.5, "half_life": 36},
 }
 
+# Tumor growth model
 def tumor_growth(state, t, params):
-    """Enhanced tumor growth model with drug-specific effects"""
     tumor_size, drug_conc = state
-    
     if tumor_size <= 0.1:
         return [0, 0]
-    
-    # Unpack parameters
+
     carrying_capacity = params['tumor_carrying_capacity']
     base_growth_rate = params['tumor_growth_rate']
     drug_type = params['drug_type']
     
-    # Calculate drug effects
     drug_coef = DRUG_COEFFICIENTS[drug_type]
     growth_inhibition = drug_coef['growth_inhibition'] * drug_conc
     direct_kill = drug_coef['direct_kill'] * drug_conc
-    
-    # Modified growth rate based on drug presence
+
     effective_growth_rate = base_growth_rate * (1 / (1 + growth_inhibition))
-    
-    # Tumor growth with drug effects
     dTdt = effective_growth_rate * tumor_size * (1 - tumor_size / carrying_capacity) - direct_kill * tumor_size
-    
-    # Drug clearance based on half-life
-    dDdt = -np.log(2) / DRUG_COEFFICIENTS[drug_type]['half_life'] * drug_conc
-    
+    dDdt = -np.log(2) / drug_coef['half_life'] * drug_conc
+
     return [max(dTdt, -tumor_size), dDdt]
 
+# Treatment simulation
 def simulate_treatment(patient, drug_type, dose):
-    """Improved treatment simulation with realistic pharmacokinetics"""
-    # Simulation parameters
     days = 150
     steps_per_day = 24
     time = np.linspace(0, days, days * steps_per_day)
     
-    # Initial conditions
-    initial_state = [patient['tumor_size'], 0.0]  # [tumor size, drug concentration]
-    
-    # Parameters for the ODE solver
+    initial_state = [patient['tumor_size'], 0.0]
     params = {
         'tumor_carrying_capacity': patient['tumor_carrying_capacity'],
         'tumor_growth_rate': patient['tumor_growth_rate'],
         'drug_type': drug_type
     }
     
-    # Storage for results
     results = []
     current_state = initial_state.copy()
     
-    # Simulate with daily dosing for first 5 days
     for t_start, t_end in zip(time[:-1], time[1:]):
-        # Add drug dose at the start of each day for first 5 days
-        if int(t_start) < 5 and abs(t_start - int(t_start)) < 1/steps_per_day:
+        if int(t_start) < 5 and abs(t_start - int(t_start)) < 1 / steps_per_day:
             current_state[1] += dose / patient['body_weight']
         
-        # Solve for this time step
-        solution = odeint(
-            tumor_growth,
-            current_state,
-            [t_start, t_end],
-            args=(params,)
-        )
-        
-        current_state = [
-            max(0.1, solution[-1, 0]),  # Tumor size
-            max(0, solution[-1, 1])     # Drug concentration
-        ]
+        solution = odeint(tumor_growth, current_state, [t_start, t_end], args=(params,))
+        current_state = [max(0.1, solution[-1, 0]), max(0, solution[-1, 1])]
         results.append(current_state.copy())
-    
+
     results = np.array(results)
-    return time[1:], results[:, 0], results[:, 1]  # time, tumor sizes, drug concentrations
+    return time[1:], results[:, 0], results[:, 1]
+
+# Save & Load Model
 def save_model():
     with open(MODEL_FILE, "wb") as f:
         pickle.dump((tumor_growth, simulate_treatment), f)
@@ -123,8 +77,17 @@ def save_model():
 def load_model():
     with open(MODEL_FILE, "rb") as f:
         return pickle.load(f)
-    
 
+# Handle OPTIONS request (CORS preflight)
+@app.route('/simulate', methods=['OPTIONS'])
+def handle_options():
+    response = jsonify({"message": "CORS Preflight OK"})
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
+
+# Simulation API Route
 @app.route('/simulate', methods=['POST'])
 def simulate():
     try:
@@ -156,7 +119,7 @@ def simulate():
         
         results.sort(key=lambda x: -x["ranking_score"])
         return jsonify({"best_treatment": results[0], "all_results": results})
-        
+
     except KeyError as e:
         logging.error(f"Missing key in request: {e}")
         return jsonify({"error": f"Missing required parameter: {str(e)}"}), 400
@@ -166,5 +129,5 @@ def simulate():
 
 if __name__ == '__main__':
     save_model()
-    port = int(os.environ.get("PORT", 10000))  # Render assigns a dynamic port
+    port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port, debug=True)
